@@ -1,0 +1,122 @@
+import pandas as pd
+import numpy as np
+import os
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import cross_val_score, KFold
+from sklearn.metrics import mean_squared_error, r2_score
+from skopt import BayesSearchCV
+from skopt.space import Integer
+import matplotlib.pyplot as plt
+from sklearn.inspection import PartialDependenceDisplay, permutation_importance
+import shap
+from scipy.stats import ttest_1samp
+import joblib   # <---- Added: import joblib
+
+# 1. Read data
+file_path = r"D:\SHUOSHI\论文\土壤赋存形态酸碱度\Dataset（酸碱度）.xlsx"
+sheet_name = "Zn" # Modify the corresponding worksheet
+df = pd.read_excel(file_path, sheet_name=sheet_name)
+
+# 2. Features and target
+feature_names = ['Clay', 'Silt', 'Sand', 'pH', 'CEC', 'OC', 'Total_metals_content', 'MAP', 'MAT']
+X = df[feature_names]
+y = df['F1-fraction Percentage']
+
+# 3. Bayesian optimization for Random Forest
+param_space = {
+    'n_estimators': Integer(50, 300),
+    'max_depth': Integer(2, 20),
+    'min_samples_split': Integer(2, 10),
+    'min_samples_leaf': Integer(1, 8)
+}
+rf = RandomForestRegressor(random_state=42)
+opt = BayesSearchCV(
+    estimator=rf,
+    search_spaces=param_space,
+    n_iter=30,
+    cv=5,
+    scoring='neg_mean_squared_error',
+    random_state=42,
+    n_jobs=-1
+)
+opt.fit(X, y)
+best_rf = opt.best_estimator_
+
+# =========Output of optimal hyperparameters for the final model========
+print('\nBest hyperparameters:')
+for k, v in opt.best_params_.items():
+    print(f'    {k}: {v}')
+
+save_dir = os.path.dirname(file_path)
+model_out_path = os.path.join(save_dir, "Best_RF_Model.pkl")
+joblib.dump(best_rf, model_out_path)
+print(f"\nTrained Random Forest model saved to: {model_out_path}")
+
+# Get predictions for saving observed vs predicted values
+y_pred = best_rf.predict(X)
+
+real_pred_df = pd.DataFrame({
+    'Observed_F1-fraction_Percentage': y,
+    'Predicted_F1-fraction_Percentage': y_pred
+})
+real_pred_excel_out = os.path.join(save_dir, "Observed_vs_Predicted.xlsx")
+real_pred_df.to_excel(real_pred_excel_out, index=False)
+print(f"\nObserved and predicted values saved to: {real_pred_excel_out}")
+
+# 4. Cross-validation evaluation
+cv = KFold(n_splits=5, shuffle=True, random_state=42)
+cv_r2 = cross_val_score(best_rf, X, y, scoring='r2', cv=cv)
+cv_rmse = -cross_val_score(best_rf, X, y, scoring='neg_root_mean_squared_error', cv=cv)
+print(f"5-fold cross-validation R2: {np.mean(cv_r2):.4f}")
+print(f"5-fold cross-validation RMSE: {np.mean(cv_rmse):.4f}")
+
+# 5. Permutation Importance (%IncMSE) calculation and output (with p-values)
+result = permutation_importance(
+    best_rf, X, y, scoring='neg_mean_squared_error', n_repeats=10, random_state=42
+)
+imp_vals = result.importances_mean
+imp_std = result.importances_std
+imp_perc = 100 * imp_vals / np.sum(np.abs(imp_vals))
+
+p_values = []
+for importances in result.importances.T:
+    t_stat, p_val = ttest_1samp(importances, 0.0)
+    p_values.append(p_val)
+
+print("\nFeature %IncMSE (Percentage of error increase) and P-values:")
+for name, val, p in zip(feature_names, imp_perc, p_values):
+    print(f"{name}: {val:.2f}%\tP-value: {p:.4e}")
+
+# 6. SHAP analysis
+explainer = shap.TreeExplainer(best_rf)
+shap_values = explainer.shap_values(X)
+
+# (1) Global feature importance (mean absolute SHAP values)
+mean_abs_shap = np.abs(shap_values).mean(axis=0)
+shap_importance_df = pd.DataFrame({'Feature': feature_names, 'mean_abs_SHAP': mean_abs_shap})
+shap_importance_df.sort_values('mean_abs_SHAP', ascending=False, inplace=True)
+print("\nSHAP global feature importance:")
+print(shap_importance_df)
+
+# (2) Save original values and SHAP values for each sample to Excel
+save_df_dict = {}
+for i, feat in enumerate(feature_names):
+    save_df_dict[f'{feat}_value'] = X[feat].values
+    save_df_dict[f'{feat}_shap'] = shap_values[:, i]
+save_df = pd.DataFrame(save_df_dict)
+shap_excel_path = os.path.join(save_dir, "Samples_Feature_SHAP.xlsx")
+save_df.to_excel(shap_excel_path, index=False)
+print(f"\nSample original values and SHAP values saved to: {shap_excel_path}")
+
+# (3) Plot SHAP importance bar chart
+plt.figure(figsize=(8, 6))
+plt.barh(shap_importance_df['Feature'], shap_importance_df['mean_abs_SHAP'])
+plt.gca().invert_yaxis()
+plt.xlabel('mean(|SHAP value|)', fontdict={'fontsize': 22, 'fontweight': 'bold', 'fontname': 'Arial'})
+plt.title('Feature Importance (SHAP)', fontdict={'fontsize': 28, 'fontweight': 'bold', 'fontname': 'Arial'})
+plt.yticks(fontsize=22, fontname='Arial', fontweight='bold')
+plt.xticks(fontsize=22, fontname='Arial', fontweight='bold')
+shap_imp_plot = os.path.join(save_dir, "SHAP_Importance.png")
+plt.savefig(shap_imp_plot, bbox_inches='tight', dpi=300)
+plt.close()
+print(f"SHAP importance bar chart saved to: {shap_imp_plot}")
