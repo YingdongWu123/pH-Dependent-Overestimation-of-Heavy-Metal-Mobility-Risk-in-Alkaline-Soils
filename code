@@ -14,7 +14,7 @@ import joblib   # <---- Added: import joblib
 
 # 1. Read data
 file_path = r"D:\SHUOSHI\论文\土壤赋存形态酸碱度\Dataset（酸碱度）.xlsx"
-sheet_name = "Zn" # Modify the corresponding worksheet
+sheet_name = "Cd" # Modify the corresponding worksheet
 df = pd.read_excel(file_path, sheet_name=sheet_name)
 
 # 2. Features and target
